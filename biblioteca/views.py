@@ -5,6 +5,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from .models import Autor, Libro, Prestamo
 from .serializers import AutorSerializer, LibroSerializer, PrestamoSerializer
+from rest_framework.permissions import IsAuthenticated
+from django.utils import timezone
 
 
 class AutorViewSet(viewsets.ModelViewSet):
@@ -60,32 +62,56 @@ class PrestamoViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_fields = ['devuelto', 'usuario']
     ordering = ['-fecha_prestamo']
+    permission_classes = [IsAuthenticated]  # Asegura que el usuario esté autenticado
 
     def get_queryset(self):
         # Los usuarios solo pueden ver sus propios préstamos
         if self.request.user.is_staff:
             return Prestamo.objects.all()
 
-        return Prestamo.objects.filter(usuario=self.request.user)
+        if self.request.user.is_authenticated:
+            return Prestamo.objects.filter(usuario=self.request.user)
+
+        return Prestamo.objects.none()  # Si no está autenticado, no devolver nada
     
     @action(detail=True, methods=['post'])
     def devolver(self, request, pk=None):
         """Endpoint para devolver un libro"""
-        prestamo = self.get_object()
+        try:
+            prestamo = self.get_object()
 
-        if prestamo.devuelto:
+            if prestamo.devuelto:
+                return Response(
+                    {'error': 'El libro ya ha sido devuelto'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            prestamo.devuelto = True
+            prestamo.fecha_devolucion = timezone.now()
+            prestamo.save()
+
+            libro = prestamo.libro
+            libro.disponible = True
+            libro.save()
+
             return Response(
-                {'error': 'El libro ya ha sido devuelto'},
-                status=status.HTTP_400_BAD_REQUEST
+                {
+                    'mensaje': f'Libro "{libro.titulo}" devuelto exitosamente',
+                    'prestamo': {
+                        'id': prestamo.id,
+                        'libro': prestamo.libro.id,
+                        'libro_titulo': prestamo.libro.titulo,
+                        'usuario': prestamo.usuario.id,
+                        'usuario_username': prestamo.usuario.username,
+                        'fecha_prestamo': prestamo.fecha_prestamo,
+                        'fecha_devolucion': prestamo.fecha_devolucion,
+                        'devuelto': prestamo.devuelto
+                    }
+                },
+                status=status.HTTP_200_OK
             )
-
-        prestamo.devuelto = True
-        prestamo.fecha_devolucion = timezone.now()
-        prestamo.save()
-
-        libro = prestamo.libro
-        libro.disponible = True
-        libro.save()
-
-        return Response({'mensaje': f'Libro "{libro.titulo}" devuelto exitosamente'})
-    
+        except Exception as e:
+            return Response(
+                {'error': f'Ocurrió un error: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
